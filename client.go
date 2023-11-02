@@ -46,7 +46,11 @@ type Client struct {
 	ErrorCh chan Error
 }
 
-func NewClient(options ClientOptions) (client *Client, err error) {
+func NewClient() (client *Client, err error) {
+	return NewClientWithOptions(&ClientOptions{})
+}
+
+func NewClientWithOptions(options *ClientOptions) (client *Client, err error) {
 	authenticatePayload := struct {
 		ProviderType string `json:"providerType,omitempty"`
 		ProjectKey   string `json:"projectKey,omitempty"`
