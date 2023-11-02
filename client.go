@@ -359,39 +359,41 @@ type ClientOptions struct {
 }
 
 func (c *Client) startTokenRotation(firstTokenExpiryDate string) {
-	countRotation := func(expiryDate string) time.Duration {
-		ts, _ := time.Parse(time.RFC3339, expiryDate)
-		return ts.Sub(time.Now().Add(10 * time.Second))
-	}
-	timer := time.NewTimer(countRotation(firstTokenExpiryDate))
-
-	var rotateTokenResponse struct {
-		Token           string `json:"token"`
-		TokenExpiryDate string `json:"tokenExpiryDate"`
-	}
-	for {
-		select {
-		case <-c.tokenRotationQuitCh:
-			return
-		case <-timer.C:
-			rotateTokenPayload := c.createAuthPayload()
-			_, err := c.reqClient.R().
-				SetBody(&rotateTokenPayload).
-				SetSuccessResult(&rotateTokenResponse).
-				Post("/rotate-token")
-
-			if err != nil {
-				go func() {
-					c.ErrorCh <- Error{err.Error()}
-				}()
-				return
-			}
-			c.tokenLock.Lock()
-			c.token = rotateTokenResponse.Token
-			c.tokenLock.Unlock()
-			timer.Reset(countRotation(rotateTokenResponse.TokenExpiryDate))
+	go func() {
+		countRotation := func(expiryDate string) time.Duration {
+			ts, _ := time.Parse(time.RFC3339, expiryDate)
+			return ts.Sub(time.Now().Add(10 * time.Second))
 		}
-	}
+		timer := time.NewTimer(countRotation(firstTokenExpiryDate))
+
+		var rotateTokenResponse struct {
+			Token           string `json:"token"`
+			TokenExpiryDate string `json:"tokenExpiryDate"`
+		}
+		for {
+			select {
+			case <-c.tokenRotationQuitCh:
+				return
+			case <-timer.C:
+				rotateTokenPayload := c.createAuthPayload()
+				_, err := c.reqClient.R().
+					SetBody(&rotateTokenPayload).
+					SetSuccessResult(&rotateTokenResponse).
+					Post("/rotate-token")
+
+				if err != nil {
+					go func() {
+						c.ErrorCh <- Error{err.Error()}
+					}()
+					return
+				}
+				c.tokenLock.Lock()
+				c.token = rotateTokenResponse.Token
+				c.tokenLock.Unlock()
+				timer.Reset(countRotation(rotateTokenResponse.TokenExpiryDate))
+			}
+		}
+	}()
 }
 
 type authPayload struct {
