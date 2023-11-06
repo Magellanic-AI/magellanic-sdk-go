@@ -22,8 +22,8 @@ import (
 // TODO: http errors handling
 
 const (
-	ID_HEADER_NAME   = "magellanic-workload-id"
-	AUTH_HEADER_NAME = "magellanic-authorization"
+	IdHeaderName   = "magellanic-workload-id"
+	AuthHeaderName = "magellanic-authorization"
 )
 
 // Error type is used to inform about errors. When an error occurs, it is sent to Client.errorCh
@@ -137,7 +137,7 @@ func NewClientWithOptions(options *ClientOptions) (client *Client, err error) {
 	if err != nil {
 		return nil, err
 	}
-	reqClient.SetCommonHeader(ID_HEADER_NAME, authResponse.Id)
+	reqClient.SetCommonHeader(IdHeaderName, authResponse.Id)
 
 	spki, _ := pem.Decode([]byte(authResponse.PublicKey))
 	if spki == nil {
@@ -189,7 +189,7 @@ type Claims struct {
 // It returns the array of 2 arrays of 2 strings, where the first string of the nested array is the header name and the
 // second is the value
 func (c *Client) GenerateHeaders() (headers [2][2]string) {
-	return [2][2]string{{AUTH_HEADER_NAME, c.GetMyToken()}, {ID_HEADER_NAME, c.ID}}
+	return [2][2]string{{AuthHeaderName, c.GetMyToken()}, {IdHeaderName, c.ID}}
 }
 
 // ValidateToken validates the token of the specified workload.
