@@ -26,14 +26,19 @@ const (
 	AUTH_HEADER_NAME = "magellanic-authorization"
 )
 
+// Error type is used to inform about errors. When an error occurs, it is sent to Client.errorCh
 type Error struct {
 	Message string
 }
 
+// Client is used to integrate your application into Magellanic.
+//
+// Use NewClient or NewClientWithOptions to create an instance
 type Client struct {
 	reqClient *req.Client
 
-	Id string
+	// ID is a unique ID of this workload
+	ID string
 
 	token               string
 	tokenLock           sync.RWMutex
@@ -43,13 +48,15 @@ type Client struct {
 	dilithiumMode       int
 	dilithiumPrivateKey string
 
-	ErrorCh chan Error
+	errorCh chan Error
 }
 
+// NewClient creates a new Client instance without options. Use it if you are providing all Magellanic configuration options via environment variables
 func NewClient() (client *Client, err error) {
 	return NewClientWithOptions(&ClientOptions{})
 }
 
+// NewClientWithOptions creates a new Client instance with options. Use it if you want to provide all Magellanic configuration options directly
 func NewClientWithOptions(options *ClientOptions) (client *Client, err error) {
 	authenticatePayload := struct {
 		ProviderType string `json:"providerType,omitempty"`
@@ -109,7 +116,10 @@ func NewClientWithOptions(options *ClientOptions) (client *Client, err error) {
 		apiUrl = "https://api.magellanic.ai"
 	}
 	baseUrl := apiUrl + "/public-api/workloads"
-	reqClient := req.NewClient().SetBaseURL(baseUrl)
+	reqClient := req.NewClient().
+		SetCommonRetryCount(3).
+		SetBaseURL(baseUrl).
+		SetTimeout(time.Second * 15)
 
 	var authResponse struct {
 		Mode                int    `json:"mode"`
@@ -140,43 +150,62 @@ func NewClientWithOptions(options *ClientOptions) (client *Client, err error) {
 
 	client = &Client{
 		reqClient:           reqClient,
-		Id:                  authResponse.Id,
+		ID:                  authResponse.Id,
 		token:               authResponse.Token,
 		tokenRotationQuitCh: make(chan bool, 1),
 		tokenPublicKey:      parsedKey.(*rsa.PublicKey),
 		dilithiumMode:       authResponse.Mode,
 		dilithiumPrivateKey: authResponse.DilithiumPrivateKey,
-		ErrorCh:             make(chan Error),
+		errorCh:             make(chan Error),
 	}
 
 	client.startTokenRotation(authResponse.TokenExpiryDate)
 	return
 }
 
+// GetMyToken returns the most recent token of this workload
 func (c *Client) GetMyToken() (token string) {
 	c.tokenLock.RLock()
 	defer c.tokenLock.RUnlock()
 	return c.token
 }
 
-type claims struct {
+// GetErrorChannel returns the receive-only channel that will be notified of any occurring errors.
+//
+// It should always be consumed and handled in a separate goroutine
+func (c *Client) GetErrorChannel() (ch <-chan Error) {
+	return c.errorCh
+}
+
+type Claims struct {
 	WorkloadId string                     `json:"workloadId"`
 	Role       string                     `json:"role,omitempty"`
 	Resources  map[string]map[string]bool `json:"resources,omitempty"`
 	jwt.RegisteredClaims
 }
 
+// GenerateHeaders returns headers to be appended to an outgoing request addressed to another workload.
+//
+// It returns the array of 2 arrays of 2 strings, where the first string of the nested array is the header name and the
+// second is the value
 func (c *Client) GenerateHeaders() (headers [2][2]string) {
-	return [2][2]string{{AUTH_HEADER_NAME, c.GetMyToken()}, {ID_HEADER_NAME, c.Id}}
+	return [2][2]string{{AUTH_HEADER_NAME, c.GetMyToken()}, {ID_HEADER_NAME, c.ID}}
 }
 
+// ValidateToken validates the token of the specified workload.
+//
+// Returns true if the token is valid or false if not
 func (c *Client) ValidateToken(workloadId string, token string) (verifyResult bool) {
-	_, err := c.getTokenClaims(workloadId, token)
+	_, err := c.GetTokenClaims(workloadId, token)
 	return err == nil
 }
 
+// ValidateTokenWithAccess validates the token and access to the resource of the specified workload.
+//
+// Returns true if the token is valid and the workload has proper permissions or false if token is not valid or workload
+// has no sufficient permissions
 func (c *Client) ValidateTokenWithAccess(workloadId string, token string, resource string, action string) (verifyResult bool) {
-	claims, err := c.getTokenClaims(workloadId, token)
+	claims, err := c.GetTokenClaims(workloadId, token)
 	if err != nil {
 		return false
 	}
@@ -188,8 +217,9 @@ func (c *Client) ValidateTokenWithAccess(workloadId string, token string, resour
 	return false
 }
 
-func (c *Client) getTokenClaims(token string, workloadId string) (*claims, error) {
-	parsed, err := jwt.ParseWithClaims(token, &claims{}, func(token *jwt.Token) (interface{}, error) {
+// GetTokenClaims validates the token and returns its Claims if the token is valid
+func (c *Client) GetTokenClaims(workloadId, token string) (*Claims, error) {
+	parsed, err := jwt.ParseWithClaims(token, &Claims{}, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodRSA); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 		}
@@ -199,13 +229,14 @@ func (c *Client) getTokenClaims(token string, workloadId string) (*claims, error
 	if err != nil {
 		return nil, err
 	}
-	if claims, ok := parsed.Claims.(*claims); ok && parsed.Valid && claims.WorkloadId == workloadId {
+	if claims, ok := parsed.Claims.(*Claims); ok && parsed.Valid && claims.WorkloadId == workloadId {
 		return claims, nil
 	} else {
 		return nil, errors.New("invalid token")
 	}
 }
 
+// GetConfig pulls the specified configuration from Magellanic and unmarshalls it into provided result
 func (c *Client) GetConfig(configId string, result interface{}) (err error) {
 	var getConfigPayload struct {
 		authPayload
@@ -220,6 +251,7 @@ func (c *Client) GetConfig(configId string, result interface{}) (err error) {
 	return err
 }
 
+// DilithiumGenerateKeys generates Dilithium public key/private key pair. Mode must be 2 or 3
 func (c *Client) DilithiumGenerateKeys(mode int) (publicKey string, privateKey string, err error) {
 	var (
 		_publicKey  dilithium.PublicKey
@@ -241,6 +273,7 @@ func (c *Client) DilithiumGenerateKeys(mode int) (publicKey string, privateKey s
 	return base64.StdEncoding.EncodeToString(_publicKey.Bytes()), base64.StdEncoding.EncodeToString(_privateKey.Bytes()), nil
 }
 
+// DilithiumSign creates a signature of provided message using Dilithium
 func (c *Client) DilithiumSign(mode int, privateKey, message string) (signature string, err error) {
 	messageB := []byte(message)
 	privateKeyB, err := base64.StdEncoding.DecodeString(privateKey)
@@ -270,6 +303,7 @@ func (c *Client) DilithiumSign(mode int, privateKey, message string) (signature 
 	}
 }
 
+// DilithiumVerify verifies the signature of the message using Dilithium
 func (c *Client) DilithiumVerify(mode int, publicKey, message, signature string) (verifyResult bool, err error) {
 	messageBytes := []byte(message)
 	signatureB, err := base64.StdEncoding.DecodeString(signature)
@@ -301,6 +335,7 @@ func (c *Client) DilithiumVerify(mode int, publicKey, message, signature string)
 	return result, nil
 }
 
+// KyberGenerateKeys generates Kyber public key/private key pair
 func (c *Client) KyberGenerateKeys() (publicKey string, privateKey string, err error) {
 	privateKeyB, publicKeyB, err := kyberk2so.KemKeypair768()
 	if err != nil {
@@ -309,6 +344,7 @@ func (c *Client) KyberGenerateKeys() (publicKey string, privateKey string, err e
 	return base64.StdEncoding.EncodeToString(publicKeyB[:]), base64.StdEncoding.EncodeToString(privateKeyB[:]), nil
 }
 
+// KyberEncrypt generates Kyber secret and ciphertext using provided public key
 func (c *Client) KyberEncrypt(publicKey string) (ciphertext string, secret string, err error) {
 	publicKeyB, err := base64.StdEncoding.DecodeString(publicKey)
 	if err != nil {
@@ -324,6 +360,7 @@ func (c *Client) KyberEncrypt(publicKey string) (ciphertext string, secret strin
 	return base64.StdEncoding.EncodeToString(ciphertextB[:]), base64.StdEncoding.EncodeToString(secretB[:]), nil
 }
 
+// KyberDecrypt decrypts a secret using ciphertext and private key
 func (c *Client) KyberDecrypt(privateKey string, ciphertext string) (secret string, err error) {
 	privateKeyB, err := base64.StdEncoding.DecodeString(privateKey)
 	if err != nil {
@@ -346,6 +383,7 @@ func (c *Client) KyberDecrypt(privateKey string, ciphertext string) (secret stri
 	return base64.StdEncoding.EncodeToString(secretB[:]), err
 }
 
+// Close will terminate the go routines being executed to perform token rotation
 func (c *Client) Close() {
 	close(c.tokenRotationQuitCh)
 }
@@ -383,7 +421,7 @@ func (c *Client) startTokenRotation(firstTokenExpiryDate string) {
 
 				if err != nil {
 					go func() {
-						c.ErrorCh <- Error{err.Error()}
+						c.errorCh <- Error{err.Error()}
 					}()
 					return
 				}
