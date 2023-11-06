@@ -11,6 +11,7 @@ import (
 	"github.com/cloudflare/circl/sign/dilithium"
 	"github.com/cloudflare/circl/sign/eddilithium2"
 	"github.com/cloudflare/circl/sign/eddilithium3"
+	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/imroc/req/v3"
 	kyberk2so "github.com/symbolicsoft/kyber-k2so"
@@ -192,10 +193,41 @@ func (c *Client) GenerateHeaders() (headers [2][2]string) {
 	return [2][2]string{{AuthHeaderName, c.GetMyToken()}, {IdHeaderName, c.ID}}
 }
 
+// ValidateGinRequest validates request's token using provided gin context
+//
+// Returns true if the token is valid or false if not
+func (c *Client) ValidateGinRequest(context *gin.Context) (verifyResult bool) {
+	workloadId := context.GetHeader(IdHeaderName)
+	if workloadId == "" {
+		return false
+	}
+	token := context.GetHeader(AuthHeaderName)
+	if token == "" {
+		return false
+	}
+	return c.ValidateToken(workloadId, token)
+}
+
+// ValidateGinRequestWithAccess validates request's token and access to the specified resource using provided gin context
+//
+// Returns true if the token is valid and the workload has proper permissions or false if token is not valid or workload
+// has no sufficient permissions
+func (c *Client) ValidateGinRequestWithAccess(context *gin.Context, resource, action string) (verifyResult bool) {
+	workloadId := context.GetHeader(IdHeaderName)
+	if workloadId == "" {
+		return false
+	}
+	token := context.GetHeader(AuthHeaderName)
+	if token == "" {
+		return false
+	}
+	return c.ValidateTokenWithAccess(workloadId, token, resource, action)
+}
+
 // ValidateToken validates the token of the specified workload.
 //
 // Returns true if the token is valid or false if not
-func (c *Client) ValidateToken(workloadId string, token string) (verifyResult bool) {
+func (c *Client) ValidateToken(workloadId, token string) (verifyResult bool) {
 	_, err := c.GetTokenClaims(workloadId, token)
 	return err == nil
 }
@@ -204,7 +236,7 @@ func (c *Client) ValidateToken(workloadId string, token string) (verifyResult bo
 //
 // Returns true if the token is valid and the workload has proper permissions or false if token is not valid or workload
 // has no sufficient permissions
-func (c *Client) ValidateTokenWithAccess(workloadId string, token string, resource string, action string) (verifyResult bool) {
+func (c *Client) ValidateTokenWithAccess(workloadId, token, resource, action string) (verifyResult bool) {
 	claims, err := c.GetTokenClaims(workloadId, token)
 	if err != nil {
 		return false
@@ -336,7 +368,7 @@ func (c *Client) DilithiumVerify(mode int, publicKey, message, signature string)
 }
 
 // KyberGenerateKeys generates Kyber public key/private key pair
-func (c *Client) KyberGenerateKeys() (publicKey string, privateKey string, err error) {
+func (c *Client) KyberGenerateKeys() (publicKey, privateKey string, err error) {
 	privateKeyB, publicKeyB, err := kyberk2so.KemKeypair768()
 	if err != nil {
 		return "", "", err
@@ -345,7 +377,7 @@ func (c *Client) KyberGenerateKeys() (publicKey string, privateKey string, err e
 }
 
 // KyberEncrypt generates Kyber secret and ciphertext using provided public key
-func (c *Client) KyberEncrypt(publicKey string) (ciphertext string, secret string, err error) {
+func (c *Client) KyberEncrypt(publicKey string) (ciphertext, secret string, err error) {
 	publicKeyB, err := base64.StdEncoding.DecodeString(publicKey)
 	if err != nil {
 		return "", "", err
