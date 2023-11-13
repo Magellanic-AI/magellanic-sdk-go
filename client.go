@@ -36,7 +36,8 @@ type Error struct {
 //
 // Use NewClient or NewClientWithOptions to create an instance
 type Client struct {
-	reqClient *req.Client
+	reqClient  *req.Client
+	clientLock sync.Mutex
 
 	// ID is a unique ID of this workload
 	ID string
@@ -45,9 +46,7 @@ type Client struct {
 	tokenLock           sync.RWMutex
 	tokenRotationQuitCh chan bool
 	tokenPublicKey      *rsa.PublicKey
-
-	dilithiumMode       int
-	dilithiumPrivateKey string
+	secret              string
 
 	errorCh chan Error
 }
@@ -123,12 +122,11 @@ func NewClientWithOptions(options *ClientOptions) (client *Client, err error) {
 		SetTimeout(time.Second * 15)
 
 	var authResponse struct {
-		Mode                int    `json:"mode"`
-		Id                  string `json:"id"`
-		Token               string `json:"token"`
-		TokenExpiryDate     string `json:"tokenExpiryDate"`
-		PublicKey           string `json:"publicKey"`
-		DilithiumPrivateKey string `json:"dilithiumPrivateKey"`
+		Id              string `json:"id"`
+		Token           string `json:"token"`
+		TokenExpiryDate string `json:"tokenExpiryDate"`
+		PublicKey       string `json:"publicKey"`
+		Secret          string `json:"secret"`
 	}
 
 	_, err = reqClient.R().
@@ -138,7 +136,10 @@ func NewClientWithOptions(options *ClientOptions) (client *Client, err error) {
 	if err != nil {
 		return nil, err
 	}
-	reqClient.SetCommonHeader(IdHeaderName, authResponse.Id)
+	reqClient.
+		SetCommonHeader(IdHeaderName, authResponse.Id).
+		SetCommonHeader(AuthHeaderName, authResponse.Token).
+		SetCommonHeader("magellanic-workload-secret", authResponse.Secret)
 
 	spki, _ := pem.Decode([]byte(authResponse.PublicKey))
 	if spki == nil {
@@ -155,8 +156,7 @@ func NewClientWithOptions(options *ClientOptions) (client *Client, err error) {
 		token:               authResponse.Token,
 		tokenRotationQuitCh: make(chan bool, 1),
 		tokenPublicKey:      parsedKey.(*rsa.PublicKey),
-		dilithiumMode:       authResponse.Mode,
-		dilithiumPrivateKey: authResponse.DilithiumPrivateKey,
+		secret:              authResponse.Secret,
 		errorCh:             make(chan Error),
 	}
 
@@ -271,15 +271,15 @@ func (c *Client) GetTokenClaims(workloadId, token string) (*Claims, error) {
 // GetConfig pulls the specified configuration from Magellanic and unmarshalls it into provided result
 func (c *Client) GetConfig(configId string, result interface{}) (err error) {
 	var getConfigPayload struct {
-		authPayload
 		ConfigId string `json:"configId"`
 	}
-	getConfigPayload.authPayload = c.createAuthPayload()
 	getConfigPayload.ConfigId = configId
+	c.clientLock.Lock()
 	_, err = c.reqClient.R().
 		SetBody(&getConfigPayload).
 		SetSuccessResult(&result).
 		Post("/config")
+	c.clientLock.Unlock()
 	return err
 }
 
@@ -445,9 +445,7 @@ func (c *Client) startTokenRotation(firstTokenExpiryDate string) {
 			case <-c.tokenRotationQuitCh:
 				return
 			case <-timer.C:
-				rotateTokenPayload := c.createAuthPayload()
 				_, err := c.reqClient.R().
-					SetBody(&rotateTokenPayload).
 					SetSuccessResult(&rotateTokenResponse).
 					Post("/rotate-token")
 
@@ -460,20 +458,11 @@ func (c *Client) startTokenRotation(firstTokenExpiryDate string) {
 				c.tokenLock.Lock()
 				c.token = rotateTokenResponse.Token
 				c.tokenLock.Unlock()
+				c.clientLock.Lock()
+				c.reqClient.SetCommonHeader(AuthHeaderName, rotateTokenResponse.Token)
+				c.clientLock.Unlock()
 				timer.Reset(countRotation(rotateTokenResponse.TokenExpiryDate))
 			}
 		}
 	}()
-}
-
-type authPayload struct {
-	Token     string `json:"token"`
-	Signature string `json:"signature"`
-}
-
-func (c *Client) createAuthPayload() authPayload {
-	var authPayload authPayload
-	authPayload.Token = c.GetMyToken()
-	authPayload.Signature, _ = c.DilithiumSign(c.dilithiumMode, c.dilithiumPrivateKey, authPayload.Token)
-	return authPayload
 }
